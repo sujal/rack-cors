@@ -53,30 +53,45 @@ module Rack
 
     protected
       def process_request(env, cors_headers)
+        # FOR THIN:
         # The thin web server allows apps to signal async request processing by
         # throwing the symbol :async, then signalling completion later by
         # invoking env['async.callback'].
-        #
-        # Here we ensure compatibility with that protocol: if @app.call throws
-        # :async, we catch it, wrap async.callback to insert the appropriate
-        # CORS response headers, then rethrow :async up to thin.  If @app.call
-        # completes without throwing, we just add our headers immediately in
+
+        # FOR GOLIATH:
+        # Goliath is one of the servers that responds with a -1 status. In this
+        # case, the app signals completion by invoking env['async.callback']
+
+        # Here we ensure compatibility with both protocols: first, we check if 
+        # there's an async callback set. If so, chain our callback inline.
+        # The, we check if the call really was async, either by checking
+        # if @app.call throws :async or it returns a status of -1.
+        # In both cases, if @app.call completes without signaling an async 
+        # situation, we just add our headers immediately in
         # the normal synchronous fashion.
+        #
+        # For Goliath, the pattern follows their AsyncMiddleware documented 
+        # here: https://github.com/postrank-labs/goliath/wiki/Middleware
+
+        
+        if (env['async.callback'])
+          original_callback = env['async.callback']
+          env['async.callback'] = proc do |response|
+            status, headers, body = response
+            headers = headers.merge(cors_headers) if cors_headers
+            original_callback.call([status, headers, body])
+          end
+        end
 
         catch :async do
           status, headers, body = @app.call(env)
+          # if we got here, this wasn't a catch candidate
+          return [-1, {}, {}] if (status == -1)
           # if we got this far, then @app.call completed without throwing.
           headers = headers.merge(cors_headers) if cors_headers
           return [status, headers, body]
         end
 
-        # if we ended up here, must have caught :async (skipping the 'return')
-        original_callback = env['async.callback']
-        env['async.callback'] = proc do |response|
-          status, headers, body = response
-          headers = headers.merge(cors_headers) if cors_headers
-          original_callback.call([status, headers, body])
-        end
         throw :async
       end
 
